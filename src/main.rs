@@ -2,8 +2,13 @@ extern crate prometheus;
 
 extern crate nvml_wrapper;
 
+extern crate procfs;
+
+extern crate users;
+
 use nvml_wrapper::NVML;
 use nvml_wrapper::enum_wrappers::device::{TemperatureSensor, Clock};
+use nvml_wrapper::enums::device::UsedGpuMemory;
 
 use hyper::{header::CONTENT_TYPE, rt::Future, service::service_fn_ok, Body, Response, Server};
 
@@ -11,6 +16,7 @@ use prometheus::{Opts, Encoder, Gauge, IntGauge, GaugeVec, IntGaugeVec, TextEnco
 
 const NAMESPACE: &str = "nvidia_gpu";
 const LABELS: [&'static str; 3] = ["minor_number", "uuid", "name"];
+const PROCESS_LABELS: [&'static str; 6] = ["minor_number", "uuid", "name", "pid", "user", "command"];
 
 // TODO: https://lh3.googleusercontent.com/1GLnuV66rZqTmWQJ1QXW6f8yz1rCLJ9tIzq4RgsEA_qhBOq72KJCBgXeLdc0EXWePx9E-stlEZPShJXeh2WEOtVx-iAOv38cJiApQRn9iA0uqmTnc5vINK2me1vGBxmz-IiCarlN
 
@@ -48,6 +54,7 @@ struct Collector {
     total_memory_gauge: IntGaugeVec,
     free_memory_gauge: IntGaugeVec,
     used_memory_gauge: IntGaugeVec,
+    process_memory_used_gauge: IntGaugeVec,
 }
 
 impl Collector {
@@ -100,6 +107,11 @@ impl Collector {
         let used_memory_opts = Opts::new("memory_used_bytes", "Memory used by the GPU device in bytes");
         let used_memory_gauge = IntGaugeVec::new(used_memory_opts, &LABELS).unwrap();
         registry.register(Box::new(used_memory_gauge.clone())).unwrap();
+        
+        // Running processes
+        let process_memory_used_opts = Opts::new("process_memory_used_bytes", "Memory used by the process in bytes");
+        let process_memory_used_gauge = IntGaugeVec::new(process_memory_used_opts, &PROCESS_LABELS).unwrap();
+        registry.register(Box::new(process_memory_used_gauge.clone())).unwrap();
 
         // Process
         let collector = Collector {
@@ -114,6 +126,7 @@ impl Collector {
             total_memory_gauge,
             free_memory_gauge,
             used_memory_gauge,
+            process_memory_used_gauge,
         };
 
         Ok(collector)
@@ -128,12 +141,11 @@ impl Collector {
 
             // Create labels
             // This only exists on Linux, so we cheat for Windows
-            // let minor_number = device.minor_number()?;
-            let minor_number = device_num;
+            let minor_number = device.minor_number()?.to_string();
 
             let uuid = device.uuid()?;
             let name = device.name()?;
-            let labels: [&str; 3] = [&minor_number.to_string(), &uuid, &name];
+            let labels: [&str; 3] = [&minor_number, &uuid, &name];
 
             // Utilization
             if let Ok(utilization) = device.utilization_rates() {
@@ -166,12 +178,20 @@ impl Collector {
             // Processes
             if let Ok(processes) = device.running_compute_processes() {
                 for process in processes {
-                    println!("{:?}", process);
-                    let accounting_stats = device.accounting_stats_for(process.pid)?;
+                    let pid = process.pid as i32;
+                    if let Ok(proc) = procfs::Process::new(pid) {
+                        let cmd = proc.cmdline().expect("cmd name not found").join(" ");
+                        let user_id = proc.owner;
+                        let owner = users::get_user_by_uid(user_id).expect("User not found");
 
-                    if !accounting_stats.is_running {
-                        continue;
+                        let proc_labels: [&str; 6] = [&minor_number.to_string(), &uuid, &name, &pid.to_string(), owner.name().to_str().unwrap(), &cmd];
+                        let used_memory = match process.used_gpu_memory {
+                            UsedGpuMemory::Used(v) => v as i64,
+                            _ => -1,
+                        };
+                        self.process_memory_used_gauge.get_metric_with_label_values(&proc_labels)?.set(used_memory);
                     }
+
                 }
             }
         }
@@ -180,50 +200,36 @@ impl Collector {
     }
 }
 
-fn main() -> Result<()> {
-    let collector = Collector::new()?;
-    collector.collect()?;
+fn main() {
 
-    let mut buffer = Vec::<u8>::new();
-    let encoder = prometheus::TextEncoder::new();
-    encoder.encode(&collector.registry.gather(), &mut buffer).unwrap();
+    let addr = ([0, 0, 0, 0], 9898).into();
+    println!("Listening address: {:?}", addr);
 
-    println!("{}", String::from_utf8(buffer.clone()).unwrap());
+    let new_service = || {
+        let collector = Collector::new().unwrap();
+        let encoder = TextEncoder::new();
 
-    Ok(())
+        service_fn_ok(move |_request| {
+            println!("Got request");
 
-//    let addr = ([127, 0, 0, 1], 9898).into();
-//    println!("Listening address: {:?}", addr);
-//
-//    // Get the first `Device` (GPU) in the system
-//    let device = nvml.device_by_index(0)?;
-//
-//    let brand = device.brand()?; // GeForce on my system
-//    let fan_speed = device.fan_speed()?; // Currently 17% on my system
+            collector.collect().unwrap();
 
-//    let new_service = || {
-//
-//        let encoder = TextEncoder::new();
-//        service_fn_ok(move |_request| {
-//            NUM_DEVICES.inc();
-//
-//            HTTP_BODY_GAUGE.set(buffer.len() as f64);
-//
-//            let response = Response::builder()
-//                .status(200)
-//                .header(CONTENT_TYPE, encoder.format_type())
-//                .body(Body::from(buffer))
-//                .unwrap();
-//
-//            timer.observe_duration();
-//
-//            response
-//        })
-//    };
-//
-//    let server = Server::bind(&addr)
-//        .serve(new_service)
-//        .map_err(|e| eprintln!("Server error: {}", e));
-//
-//    hyper::rt::run(server);
+            let mut buffer = Vec::<u8>::new();
+            encoder.encode(&collector.registry.gather(), &mut buffer).unwrap();
+
+            let response = Response::builder()
+                .status(200)
+                .header(CONTENT_TYPE, encoder.format_type())
+                .body(Body::from(buffer))
+                .unwrap();
+
+            response
+        })
+    };
+
+    let server = Server::bind(&addr)
+        .serve(new_service)
+        .map_err(|e| eprintln!("Server error: {}", e));
+
+    hyper::rt::run(server);
 }

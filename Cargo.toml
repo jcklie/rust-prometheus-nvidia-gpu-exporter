@@ -1,5 +1,5 @@
 [package]
-name = "rust-prometheus-nvidia-gpu"
+name = "prometheus-nvidia-gpu"
 version = "0.1.0"
 authors = ["Jan-Christoph Klie <git@mrklie.com>"]
 edition = "2018"
@@ -7,7 +7,9 @@ edition = "2018"
 [dependencies]
 hyper = "0.12"
 lazy_static = "1.3"
-nvml-wrapper = { git = "https://github.com/Cldfire/nvml-wrapper.git", branch = "devel" }
+nvml-wrapper = "0.4.1"
+procfs = "0.5.3"
+users = "0.9"
 
 [dependencies.prometheus]
 git = "https://github.com/pingcap/rust-prometheus.git"
