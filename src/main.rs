@@ -10,7 +10,10 @@ use nvml_wrapper::enum_wrappers::device::{Clock, TemperatureSensor};
 use nvml_wrapper::enums::device::UsedGpuMemory;
 use nvml_wrapper::NVML;
 
-use hyper::{header::CONTENT_TYPE, rt::Future, service::service_fn_ok, Body, Response, Server};
+use hyper::{
+    header::CONTENT_TYPE, rt::Future, service::service_fn_ok, Body, Method, Response, Server,
+    StatusCode,
+};
 
 use prometheus::{Encoder, IntGauge, IntGaugeVec, Opts, Registry, TextEncoder};
 
@@ -236,8 +239,10 @@ impl Collector {
         Ok(())
     }
 
-    fn process(&self) -> Result<()> {
+    fn process(&self) -> Result<String> {
         let num_devices = self.nvml.device_count()?;
+
+        let mut lines = Vec::<String>::new();
 
         for device_num in 0..num_devices {
             let device = self.nvml.device_by_index(device_num)?;
@@ -252,6 +257,9 @@ impl Collector {
                     let cmd = proc.cmdline().expect("cmd name not found").join(" ");
                     let user_id = proc.owner;
                     let owner = users::get_user_by_uid(user_id).expect("User not found");
+                    let temperature = device.temperature(TemperatureSensor::Gpu)?;
+                    let gpu_usage = device.utilization_rates()?.gpu;
+                    let memory_info = device.memory_info()?;
 
                     let proc_labels: [&str; 6] = [
                         &minor_number.to_string(),
@@ -261,43 +269,53 @@ impl Collector {
                         owner.name().to_str().unwrap(),
                         &cmd,
                     ];
-                    let used_memory = match process.used_gpu_memory {
-                        UsedGpuMemory::Used(v) => v as i64,
-                        _ => -1,
-                    };
+
+
+                    let line = format!("[{}] {}|{}°C {}%| {} / {} MB", device_num, name, temperature, gpu_usage, memory_info.used, memory_info.total);
+                    lines.push(line);
                 }
             }
         }
 
-        Ok(())
+        Ok(lines.join("\n"))
     }
 }
 
 fn main() {
-    let addr = ([0, 0, 0, 0], 9898).into();
+    let addr = ([0, 0, 0, 0], 9899).into();
     println!("Listening address: {:?}", addr);
 
     let new_service = || {
         let collector = Collector::new().unwrap();
         let encoder = TextEncoder::new();
 
-        service_fn_ok(move |_request| {
-            println!("Got request");
+        service_fn_ok(move |req| match (req.method(), req.uri().path()) {
+            (&Method::GET, "/metrics") => {
+                collector.collect().unwrap();
 
-            collector.collect().unwrap();
+                let mut buffer = Vec::<u8>::new();
+                encoder
+                    .encode(&collector.registry.gather(), &mut buffer)
+                    .unwrap();
 
-            let mut buffer = Vec::<u8>::new();
-            encoder
-                .encode(&collector.registry.gather(), &mut buffer)
-                .unwrap();
-
-            let response = Response::builder()
-                .status(200)
-                .header(CONTENT_TYPE, encoder.format_type())
-                .body(Body::from(buffer))
-                .unwrap();
-
-            response
+                Response::builder()
+                    .status(200)
+                    .header(CONTENT_TYPE, encoder.format_type())
+                    .body(Body::from(buffer))
+                    .unwrap()
+            }
+            (&Method::GET, "/gpustat") => {
+                let s = collector.process().unwrap();
+                Response::builder()
+                    .status(200)
+                    .header(CONTENT_TYPE, encoder.format_type())
+                    .body(Body::from(s))
+                    .unwrap()
+            }
+            _ => Response::builder()
+                .status(StatusCode::NOT_FOUND)
+                .body(Body::from("Not found"))
+                .unwrap(),
         })
     };
 
