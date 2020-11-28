@@ -64,88 +64,70 @@ impl Collector {
     fn new() -> Result<Collector> {
         let nvml = NVML::init()?;
 
-        let registry = Registry::new_custom(Some(NAMESPACE.to_string()), None).unwrap();
+        let registry = Registry::new_custom(Some(NAMESPACE.to_string()), None)?;
 
         // Num devices
         let num_devices_opts = Opts::new("num_devices", "Number of GPU devices");
-        let num_devices_gauge = IntGauge::with_opts(num_devices_opts).unwrap();
-        registry
-            .register(Box::new(num_devices_gauge.clone()))
-            .unwrap();
+        let num_devices_gauge = IntGauge::with_opts(num_devices_opts)?;
+        registry.register(Box::new(num_devices_gauge.clone()))?;
 
         // CPU utilization
         let gpu_utilization_opts = Opts::new("gpu_utilization", "Percent of time over the past sample period during which one or more kernels were executing on the GPU device");
-        let gpu_utilization_gauge = IntGaugeVec::new(gpu_utilization_opts, &LABELS).unwrap();
-        registry
-            .register(Box::new(gpu_utilization_gauge.clone()))
-            .unwrap();
+        let gpu_utilization_gauge = IntGaugeVec::new(gpu_utilization_opts, &LABELS)?;
+        registry.register(Box::new(gpu_utilization_gauge.clone()))?;
 
         // Memory utilization
         let memory_utilization_opts = Opts::new("memory_utilization", "Percent of time over the past sample period during which global (device) memory was being read or written to.");
-        let memory_utilization_gauge = IntGaugeVec::new(memory_utilization_opts, &LABELS).unwrap();
-        registry
-            .register(Box::new(memory_utilization_gauge.clone()))
-            .unwrap();
+        let memory_utilization_gauge = IntGaugeVec::new(memory_utilization_opts, &LABELS)?;
+        registry.register(Box::new(memory_utilization_gauge.clone()))?;
 
         // Power usage
         let power_usage_opts = Opts::new(
             "power_usage_milliwatts",
             "Power usage of the GPU device in milliwatts",
         );
-        let power_usage_gauge = IntGaugeVec::new(power_usage_opts, &LABELS).unwrap();
-        registry
-            .register(Box::new(power_usage_gauge.clone()))
-            .unwrap();
+        let power_usage_gauge = IntGaugeVec::new(power_usage_opts, &LABELS)?;
+        registry.register(Box::new(power_usage_gauge.clone()))?;
 
         // Temperature
         let temperature_opts = Opts::new(
             "temperature_celsius",
             "Temperature of the GPU device in celsius",
         );
-        let temperature_gauge = IntGaugeVec::new(temperature_opts, &LABELS).unwrap();
-        registry
-            .register(Box::new(temperature_gauge.clone()))
-            .unwrap();
+        let temperature_gauge = IntGaugeVec::new(temperature_opts, &LABELS)?;
+        registry.register(Box::new(temperature_gauge.clone()))?;
 
         // Fan speed
         let fan_speed_opts = Opts::new(
             "fanspeed_percent",
             "Fan speed of the GPU device as a percent of its maximum",
         );
-        let fan_speed_gauge = IntGaugeVec::new(fan_speed_opts, &LABELS).unwrap();
-        registry
-            .register(Box::new(fan_speed_gauge.clone()))
-            .unwrap();
+        let fan_speed_gauge = IntGaugeVec::new(fan_speed_opts, &LABELS)?;
+        registry.register(Box::new(fan_speed_gauge.clone()))?;
 
         // Total memory
         let total_memory_opts = Opts::new(
             "memory_total_bytes",
             "Total memory available by the GPU device in bytes",
         );
-        let total_memory_gauge = IntGaugeVec::new(total_memory_opts, &LABELS).unwrap();
-        registry
-            .register(Box::new(total_memory_gauge.clone()))
-            .unwrap();
+        let total_memory_gauge = IntGaugeVec::new(total_memory_opts, &LABELS)?;
+        registry.register(Box::new(total_memory_gauge.clone()))?;
 
         // Free memory
         let free_memory_opts = Opts::new(
             "memory_free_bytes",
             "Free memory of the GPU device in bytes",
         );
-        let free_memory_gauge = IntGaugeVec::new(free_memory_opts, &LABELS).unwrap();
-        registry
-            .register(Box::new(free_memory_gauge.clone()))
-            .unwrap();
+        let free_memory_gauge = IntGaugeVec::new(free_memory_opts, &LABELS)?;
+        registry.register(Box::new(free_memory_gauge.clone()))?;
 
         // Used memory
         let used_memory_opts = Opts::new(
             "memory_used_bytes",
             "Memory used by the GPU device in bytes",
         );
-        let used_memory_gauge = IntGaugeVec::new(used_memory_opts, &LABELS).unwrap();
-        registry
-            .register(Box::new(used_memory_gauge.clone()))
-            .unwrap();
+        let used_memory_gauge = IntGaugeVec::new(used_memory_opts, &LABELS)?;
+        registry.register(Box::new(used_memory_gauge.clone()))?;
 
         // Running processes
         let process_memory_used_opts = Opts::new(
@@ -153,10 +135,8 @@ impl Collector {
             "Memory used by the process in bytes",
         );
         let process_memory_used_gauge =
-            IntGaugeVec::new(process_memory_used_opts, &PROCESS_LABELS).unwrap();
-        registry
-            .register(Box::new(process_memory_used_gauge.clone()))
-            .unwrap();
+            IntGaugeVec::new(process_memory_used_opts, &PROCESS_LABELS)?;
+        registry.register(Box::new(process_memory_used_gauge.clone()))?;
 
         // Process
         let collector = Collector {
@@ -266,12 +246,19 @@ impl Collector {
                         &uuid,
                         &name,
                         &pid.to_string(),
-                        owner.name().to_str().unwrap(),
+                        owner.name().to_str().expect("Encoding error"),
                         &cmd,
                     ];
 
-
-                    let line = format!("[{}] {}|{}°C {}%| {} / {} MB", device_num, name, temperature, gpu_usage, memory_info.used, memory_info.total);
+                    let line = format!(
+                        "[{}] {}|{}°C {}%| {} / {} MB",
+                        device_num,
+                        name,
+                        temperature,
+                        gpu_usage,
+                        memory_info.used,
+                        memory_info.total
+                    );
                     lines.push(line);
                 }
             }
@@ -286,36 +273,36 @@ fn main() {
     println!("Listening address: {:?}", addr);
 
     let new_service = || {
-        let collector = Collector::new().unwrap();
+        let collector = Collector::new().expect("Error while creating collector");
         let encoder = TextEncoder::new();
 
         service_fn_ok(move |req| match (req.method(), req.uri().path()) {
             (&Method::GET, "/metrics") => {
-                collector.collect().unwrap();
+                collector.collect().expect("Error collecting");
 
                 let mut buffer = Vec::<u8>::new();
                 encoder
                     .encode(&collector.registry.gather(), &mut buffer)
-                    .unwrap();
+                    .expect("Encoding error");
 
                 Response::builder()
                     .status(200)
                     .header(CONTENT_TYPE, encoder.format_type())
                     .body(Body::from(buffer))
-                    .unwrap()
+                    .expect("Failed to build metrics response")
             }
             (&Method::GET, "/gpustat") => {
-                let s = collector.process().unwrap();
+                let s = collector.process().expect("Failed process query");
                 Response::builder()
                     .status(200)
                     .header(CONTENT_TYPE, encoder.format_type())
                     .body(Body::from(s))
-                    .unwrap()
+                    .expect("Failed to build gpustat response")
             }
             _ => Response::builder()
                 .status(StatusCode::NOT_FOUND)
                 .body(Body::from("Not found"))
-                .unwrap(),
+                .expect("Failed to build 404 response"),
         })
     };
 
