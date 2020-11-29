@@ -1,3 +1,5 @@
+#![feature(async_closure)]
+
 extern crate prometheus;
 
 extern crate nvml_wrapper;
@@ -10,10 +12,9 @@ use nvml_wrapper::enum_wrappers::device::{Clock, TemperatureSensor};
 use nvml_wrapper::enums::device::UsedGpuMemory;
 use nvml_wrapper::NVML;
 
-use hyper::{
-    header::CONTENT_TYPE, rt::Future, service::service_fn_ok, Body, Method, Response, Server,
-    StatusCode,
-};
+use hyper::header::CONTENT_TYPE;
+use hyper::service::{make_service_fn, service_fn};
+use hyper::{Body, Error, Method, Response, Server, StatusCode};
 
 use prometheus::{Encoder, IntGauge, IntGaugeVec, Opts, Registry, TextEncoder};
 
@@ -30,12 +31,12 @@ type Result<T> = std::result::Result<T, CollectingError>;
 
 #[derive(Debug)]
 enum CollectingError {
-    Nvml(nvml_wrapper::error::Error),
+    Nvml(nvml_wrapper::error::NvmlError),
     Prometheus(prometheus::Error),
 }
 
-impl From<nvml_wrapper::error::Error> for CollectingError {
-    fn from(err: nvml_wrapper::error::Error) -> CollectingError {
+impl From<nvml_wrapper::error::NvmlError> for CollectingError {
+    fn from(err: nvml_wrapper::error::NvmlError) -> CollectingError {
         CollectingError::Nvml(err)
     }
 }
@@ -196,7 +197,7 @@ impl Collector {
             }
 
             // Fan speed
-            if let Ok(fan_speed) = device.fan_speed() {
+            if let Ok(fan_speed) = device.fan_speed(0) {
                 self.fan_speed_gauge
                     .get_metric_with_label_values(&labels)?
                     .set(fan_speed as i64);
@@ -233,7 +234,7 @@ impl Collector {
 
             for process in processes {
                 let pid = process.pid as i32;
-                if let Ok(proc) = procfs::Process::new(pid) {
+                if let Ok(proc) = procfs::process::Process::new(pid) {
                     let cmd = proc.cmdline().expect("cmd name not found").join(" ");
                     let user_id = proc.owner;
                     let owner = users::get_user_by_uid(user_id).expect("User not found");
@@ -268,47 +269,55 @@ impl Collector {
     }
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     let addr = ([0, 0, 0, 0], 9899).into();
-    println!("Listening address: {:?}", addr);
 
-    let new_service = || {
+    let make_service = make_service_fn(move |_| {
         let collector = Collector::new().expect("Error while creating collector");
         let encoder = TextEncoder::new();
 
-        service_fn_ok(move |req| match (req.method(), req.uri().path()) {
-            (&Method::GET, "/metrics") => {
-                collector.collect().expect("Error collecting");
+        async move {
+            Ok::<_, Error>(service_fn(move |req| {
+                let response = match (req.method(), req.uri().path()) {
+                    (&Method::GET, "/metrics") => {
+                        collector.collect().expect("Error collecting");
 
-                let mut buffer = Vec::<u8>::new();
-                encoder
-                    .encode(&collector.registry.gather(), &mut buffer)
-                    .expect("Encoding error");
+                        let mut buffer = Vec::<u8>::new();
+                        encoder
+                            .encode(&collector.registry.gather(), &mut buffer)
+                            .expect("Encoding error");
 
-                Response::builder()
-                    .status(200)
-                    .header(CONTENT_TYPE, encoder.format_type())
-                    .body(Body::from(buffer))
-                    .expect("Failed to build metrics response")
-            }
-            (&Method::GET, "/gpustat") => {
-                let s = collector.process().expect("Failed process query");
-                Response::builder()
-                    .status(200)
-                    .header(CONTENT_TYPE, encoder.format_type())
-                    .body(Body::from(s))
-                    .expect("Failed to build gpustat response")
-            }
-            _ => Response::builder()
-                .status(StatusCode::NOT_FOUND)
-                .body(Body::from("Not found"))
-                .expect("Failed to build 404 response"),
-        })
-    };
+                        Response::builder()
+                            .status(200)
+                            .header(CONTENT_TYPE, encoder.format_type())
+                            .body(Body::from(buffer))
+                            .expect("Failed to build metrics response")
+                    }
+                    (&Method::GET, "/gpustat") => {
+                        let s = collector.process().expect("Failed process query");
+                        Response::builder()
+                            .status(200)
+                            .header(CONTENT_TYPE, encoder.format_type())
+                            .body(Body::from(s))
+                            .expect("Failed to build gpustat response")
+                    }
+                    _ => Response::builder()
+                        .status(StatusCode::NOT_FOUND)
+                        .body(Body::from("Not found"))
+                        .expect("Failed to build 404 response"),
+                };
 
-    let server = Server::bind(&addr)
-        .serve(new_service)
-        .map_err(|e| eprintln!("Server error: {}", e));
+                async move { Ok::<_, Error>(response) }
+            }))
+        }
+    });
 
-    hyper::rt::run(server);
+    let server = Server::bind(&addr).serve(make_service);
+
+    println!("Listening on http://{}", addr);
+
+    if let Err(e) = server.await {
+        eprintln!("server error: {}", e);
+    }
 }
