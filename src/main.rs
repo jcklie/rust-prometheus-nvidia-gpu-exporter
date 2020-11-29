@@ -9,7 +9,7 @@ extern crate procfs;
 extern crate users;
 
 use nvml_wrapper::enum_wrappers::device::{Clock, TemperatureSensor};
-use nvml_wrapper::enums::device::UsedGpuMemory;
+use nvml_wrapper::enums::device::UsedGpuMemory::Used;
 use nvml_wrapper::NVML;
 
 use hyper::header::CONTENT_TYPE;
@@ -227,43 +227,52 @@ impl Collector {
 
         for device_num in 0..num_devices {
             let device = self.nvml.device_by_index(device_num)?;
-            let processes = device.running_compute_processes()?;
             let minor_number = device.minor_number()?.to_string();
             let uuid = device.uuid()?;
             let name = device.name()?;
 
-            for process in processes {
+            let temperature = device
+                .temperature(TemperatureSensor::Gpu)
+                .expect("Temperature");
+            let gpu_usage = device.utilization_rates().expect("GPU").gpu;
+            let memory_info = device.memory_info().expect("Memory");
+
+            let mut pvec = Vec::<String>::new();
+            for process in device.running_compute_processes()? {
                 let pid = process.pid as i32;
-                println("{}", pid);
                 if let Ok(proc) = procfs::process::Process::new(pid) {
                     let cmd = proc.cmdline().expect("cmd name not found").join(" ");
                     let user_id = proc.owner;
                     let owner = users::get_user_by_uid(user_id).expect("User not found");
-                    let temperature = device.temperature(TemperatureSensor::Gpu).expect("Temperature");
-                    let gpu_usage = device.utilization_rates().expect("GPU").gpu;
-                    let memory_info = device.memory_info().expect("Memory");
+                    let mem = match process.used_gpu_memory {
+                        Used(x) => ((x / 1024 / 1024) as u64).to_string(),
+                        _ => "?".to_string()
+                    };
 
-                    let proc_labels: [&str; 6] = [
-                        &minor_number.to_string(),
-                        &uuid,
-                        &name,
-                        &pid.to_string(),
+                    let s = format!(
+                        "{}:{}/{}({}MB)",
                         owner.name().to_str().expect("Encoding error"),
-                        &cmd,
-                    ];
-
-                    let line = format!(
-                        "[{}] {}|{}°C {}%| {} / {} MB",
-                        device_num,
-                        name,
-                        temperature,
-                        gpu_usage,
-                        memory_info.used,
-                        memory_info.total
+                        cmd,
+                        pid,
+                        mem,
                     );
-                    lines.push(line);
+                    pvec.push(s)
                 }
             }
+
+            let line = format!(
+                "[{}] {}|{}|{}°C {}%| {:>6} / {:<6} MB | {}",
+                device_num,
+                name,
+                uuid,
+                temperature,
+                gpu_usage,
+                (memory_info.used / 1024 / 1024) as u64,
+                (memory_info.total / 1024 / 1024) as u64,
+                pvec.join(" ")
+            );
+
+            lines.push(line);
         }
 
         Ok(lines.join("\n"))
@@ -275,38 +284,45 @@ async fn main() {
     let addr = ([0, 0, 0, 0], 9899).into();
 
     let make_service = make_service_fn(move |_| {
-        let collector = Collector::new().expect("Error while creating collector");
+        let collector = Collector::new();
         let encoder = TextEncoder::new();
 
         async move {
             Ok::<_, Error>(service_fn(move |req| {
-                let response = match (req.method(), req.uri().path()) {
-                    (&Method::GET, "/metrics") => {
-                        collector.collect().expect("Error collecting");
+                let response = if let Ok(c) = &collector {
+                    match (req.method(), req.uri().path()) {
+                        (&Method::GET, "/metrics") => {
+                            c.collect().expect("Error collecting");
 
-                        let mut buffer = Vec::<u8>::new();
-                        encoder
-                            .encode(&collector.registry.gather(), &mut buffer)
-                            .expect("Encoding error");
+                            let mut buffer = Vec::<u8>::new();
+                            encoder
+                                .encode(&c.registry.gather(), &mut buffer)
+                                .expect("Encoding error");
 
-                        Response::builder()
-                            .status(200)
-                            .header(CONTENT_TYPE, encoder.format_type())
-                            .body(Body::from(buffer))
-                            .expect("Failed to build metrics response")
+                            Response::builder()
+                                .status(200)
+                                .header(CONTENT_TYPE, encoder.format_type())
+                                .body(Body::from(buffer))
+                                .expect("Failed to build metrics response")
+                        }
+                        (&Method::GET, "/gpustat") => {
+                            let s = c.process().expect("Failed process query");
+                            Response::builder()
+                                .status(200)
+                                .header(CONTENT_TYPE, encoder.format_type())
+                                .body(Body::from(s))
+                                .expect("Failed to build gpustat response")
+                        }
+                        _ => Response::builder()
+                            .status(StatusCode::NOT_FOUND)
+                            .body(Body::from("Not found"))
+                            .expect("Failed to build 404 response"),
                     }
-                    (&Method::GET, "/gpustat") => {
-                        let s = collector.process().expect("Failed process query");
-                        Response::builder()
-                            .status(200)
-                            .header(CONTENT_TYPE, encoder.format_type())
-                            .body(Body::from(s))
-                            .expect("Failed to build gpustat response")
-                    }
-                    _ => Response::builder()
-                        .status(StatusCode::NOT_FOUND)
-                        .body(Body::from("Not found"))
-                        .expect("Failed to build 404 response"),
+                } else {
+                    Response::builder()
+                        .status(StatusCode::INTERNAL_SERVER_ERROR)
+                        .body(Body::from("Could not get access to NVML"))
+                        .expect("Failed to build error response")
                 };
 
                 async move { Ok::<_, Error>(response) }
