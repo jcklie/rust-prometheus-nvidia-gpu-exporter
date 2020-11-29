@@ -234,13 +234,14 @@ impl Collector {
 
             for process in processes {
                 let pid = process.pid as i32;
+                println("{}", pid);
                 if let Ok(proc) = procfs::process::Process::new(pid) {
                     let cmd = proc.cmdline().expect("cmd name not found").join(" ");
                     let user_id = proc.owner;
                     let owner = users::get_user_by_uid(user_id).expect("User not found");
-                    let temperature = device.temperature(TemperatureSensor::Gpu)?;
-                    let gpu_usage = device.utilization_rates()?.gpu;
-                    let memory_info = device.memory_info()?;
+                    let temperature = device.temperature(TemperatureSensor::Gpu).expect("Temperature");
+                    let gpu_usage = device.utilization_rates().expect("GPU").gpu;
+                    let memory_info = device.memory_info().expect("Memory");
 
                     let proc_labels: [&str; 6] = [
                         &minor_number.to_string(),
