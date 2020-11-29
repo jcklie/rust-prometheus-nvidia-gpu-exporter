@@ -54,6 +54,9 @@ struct Collector {
     gpu_utilization_gauge: IntGaugeVec,
     memory_utilization_gauge: IntGaugeVec,
     power_usage_gauge: IntGaugeVec,
+    power_limit_gauge: IntGaugeVec,
+    clock_speed_graphics_gauge: IntGaugeVec,
+    clock_speed_sm_gauge: IntGaugeVec,
     temperature_gauge: IntGaugeVec,
     fan_speed_gauge: IntGaugeVec,
     total_memory_gauge: IntGaugeVec,
@@ -89,6 +92,30 @@ impl Collector {
         );
         let power_usage_gauge = IntGaugeVec::new(power_usage_opts, &LABELS)?;
         registry.register(Box::new(power_usage_gauge.clone()))?;
+
+        // Power limit
+        let power_limit_opts = Opts::new(
+            "power_limit_milliwatts",
+            "Power limit of the GPU device in milliwatts",
+        );
+        let power_limit_gauge = IntGaugeVec::new(power_limit_opts, &LABELS)?;
+        registry.register(Box::new(power_limit_gauge.clone()))?;
+
+        // Clock speed graphics
+        let clock_speed_graphics_opts = Opts::new(
+            "clock_speed_graphics_hertz",
+            "Clock speed of the GPU in Hz",
+        );
+        let clock_speed_graphics_gauge = IntGaugeVec::new(clock_speed_graphics_opts, &LABELS)?;
+        registry.register(Box::new(clock_speed_graphics_gauge.clone()))?;
+
+        // Clock speed streaming multiprocessor
+        let clock_speed_sm_opts = Opts::new(
+            "clock_speed_sm_hertz",
+            "Clock speed of the GPU streaming multiprocessor in Hz",
+        );
+        let clock_speed_sm_gauge = IntGaugeVec::new(clock_speed_sm_opts, &LABELS)?;
+        registry.register(Box::new(clock_speed_sm_gauge.clone()))?;
 
         // Temperature
         let temperature_opts = Opts::new(
@@ -147,6 +174,9 @@ impl Collector {
             gpu_utilization_gauge,
             memory_utilization_gauge,
             power_usage_gauge,
+            power_limit_gauge,
+            clock_speed_graphics_gauge,
+            clock_speed_sm_gauge,
             temperature_gauge,
             fan_speed_gauge,
             total_memory_gauge,
@@ -189,6 +219,27 @@ impl Collector {
                     .set(power_usage as i64);
             }
 
+            // Power limit
+            if let Ok(power_limit) = device.power_management_limit() {
+                self.power_limit_gauge
+                    .get_metric_with_label_values(&labels)?
+                    .set(power_limit as i64);
+            }
+
+            // Clock speed graphics
+            if let Ok(clock_speed_graphics) = device.clock_info(Clock::Graphics) {
+                self.clock_speed_graphics_gauge
+                    .get_metric_with_label_values(&labels)?
+                    .set(clock_speed_graphics as i64);
+            }
+
+            // Clock speed streaming multiprocessor
+            if let Ok(clock_speed_sm) = device.clock_info(Clock::SM) {
+                self.clock_speed_sm_gauge
+                    .get_metric_with_label_values(&labels)?
+                    .set(clock_speed_sm as i64);
+            }
+
             // Temperature
             if let Ok(temperature) = device.temperature(TemperatureSensor::Gpu) {
                 self.temperature_gauge
@@ -227,7 +278,6 @@ impl Collector {
 
         for device_num in 0..num_devices {
             let device = self.nvml.device_by_index(device_num)?;
-            let minor_number = device.minor_number()?.to_string();
             let uuid = device.uuid()?;
             let name = device.name()?;
 
