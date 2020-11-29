@@ -250,7 +250,7 @@ impl Collector {
                     };
 
                     let s = format!(
-                        "{}:{}/{}({}MiB)",
+                        "{}:{}/{}({} MiB)",
                         owner.name().to_str().expect("Encoding error"),
                         cmd,
                         pid,
@@ -281,7 +281,7 @@ impl Collector {
 
 #[tokio::main]
 async fn main() {
-    let addr = ([0, 0, 0, 0], 9899).into();
+    let addr = ([0, 0, 0, 0], 9898).into();
 
     let make_service = make_service_fn(move |_| {
         let collector = Collector::new();
