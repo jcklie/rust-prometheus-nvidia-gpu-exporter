@@ -241,7 +241,7 @@ impl Collector {
             for process in device.running_compute_processes()? {
                 let pid = process.pid as i32;
                 if let Ok(proc) = procfs::process::Process::new(pid) {
-                    let cmd = proc.cmdline().expect("cmd name not found").join(" ");
+                    let cmd = &proc.cmdline().expect("cmd name not found")[0];
                     let user_id = proc.owner;
                     let owner = users::get_user_by_uid(user_id).expect("User not found");
                     let mem = match process.used_gpu_memory {
@@ -250,7 +250,7 @@ impl Collector {
                     };
 
                     let s = format!(
-                        "{}:{}/{}({}MB)",
+                        "{}:{}/{}({}MiB)",
                         owner.name().to_str().expect("Encoding error"),
                         cmd,
                         pid,
@@ -261,7 +261,7 @@ impl Collector {
             }
 
             let line = format!(
-                "[{}] {}|{}|{}°C {}%| {:>6} / {:<6} MB | {}",
+                "[{}] {}|{}|{:>3}°C {:>3}%| {:>6} / {:<6} MiB | {}",
                 device_num,
                 name,
                 uuid,
@@ -275,7 +275,7 @@ impl Collector {
             lines.push(line);
         }
 
-        Ok(lines.join("\n"))
+        Ok(lines.join("\n") + "\n")
     }
 }
 
